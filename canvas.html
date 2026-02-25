@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Canvas 前端自由画布引擎</title>
+<style>
+    :root { --bg-color: #f5f5f5; --sidebar-bg: #ffffff; --primary: #1890ff; --border: #e8e8e8; }
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    body { font-family: system-ui, sans-serif; overflow: hidden; display: flex; height: 100vh; background: var(--bg-color); }
+    
+    /* 布局与 UI */
+    #sidebar { width: 260px; background: var(--sidebar-bg); border-right: 1px solid var(--border); display: flex; flex-direction: column; z-index: 10; }
+    #main { flex: 1; display: flex; flex-direction: column; position: relative; }
+    #toolbar { height: 50px; background: var(--sidebar-bg); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 16px; gap: 8px; z-index: 10; }
+    
+    .sidebar-header { padding: 12px 16px; font-weight: bold; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; }
+    #layer-list { flex: 1; overflow-y: auto; padding: 8px 0; }
+    .layer-item { display: flex; align-items: center; padding: 6px 16px; cursor: pointer; }
+    .layer-item:hover { background: #f5f5f5; }
+    .layer-item.active { background: #e6f7ff; border-left: 3px solid var(--primary); }
+    .layer-info { flex: 1; display: flex; align-items: center; gap: 8px; overflow: hidden; font-size: 13px; }
+    .layer-actions { display: flex; gap: 4px; }
+    .btn-icon { background: none; border: none; cursor: pointer; color: #666; font-size: 14px; }
+    .btn-icon:hover { color: var(--primary); }
+
+    .btn { padding: 6px 12px; border: 1px solid var(--border); background: #fff; border-radius: 4px; cursor: pointer; font-size: 13px; }
+    .btn:hover { border-color: var(--primary); color: var(--primary); }
+    .btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+    
+    /* Canvas 容器 */
+    #viewport { flex: 1; overflow: hidden; position: relative; cursor: default; }
+    #viewport.mode-pan { cursor: grab; }
+    #viewport.mode-pan:active { cursor: grabbing; }
+    #viewport.mode-draw { cursor: crosshair; }
+    
+    canvas { display: block; width: 100%; height: 100%; }
+    
+    /* 隐藏的离线资源存放区 */
+    #assets { display: none; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+    <div class="sidebar-header">
+        <span>图层列表 (Canvas)</span>
+        <div>
+            <button class="btn-icon" id="btn-group" title="打组">🔗</button>
+            <button class="btn-icon" id="btn-ungroup" title="解散">💔</button>
+        </div>
+    </div>
+    <div id="layer-list"></div>
+</div>
+
+<div id="main">
+    <div id="toolbar">
+        <button class="btn active" id="tool-select">↖ 选择</button>
+        <button class="btn" id="tool-pan">✋ 平移</button>
+        <div style="width:1px; height:20px; background:#ddd; margin:0 8px;"></div>
+        <button class="btn" id="add-artboard">🔲 画板</button>
+        <button class="btn" id="add-text">T 文本</button>
+        <button class="btn" id="add-img">🖼 图片</button>
+        <button class="btn" id="add-video">🎬 视频</button>
+        <button class="btn" id="tool-draw">🖌 画笔</button>
+        <div style="flex:1"></div>
+        <button class="btn" id="export-artboard" style="border-color:#52c41a; color:#52c41a;">💾 导出选中画板 (原生)</button>
+    </div>
+    <div id="viewport">
+        <canvas id="app-canvas"></canvas>
+    </div>
+</div>
+
+<div id="assets"></div>
+
+<script>
+/**
+ * 前端自由画布引擎 - 纯原生 Canvas 2D 渲染架构
+ */
+
+// --- 状态与配置 ---
+const canvas = document.getElementById('app-canvas');
+const ctx = canvas.getContext('2d');
+const assetsContainer = document.getElementById('assets');
+
+const State = {
+    elements: [],
+    selectedId: null,
+    mode: 'select', // select | pan | draw
+    camera: { x: 0, y: 0, scale: 1 },
+    assets: {}, // 缓存加载的 Image/Video 对象
+    
+    // 交互临时状态
+    isDragging: false,
+    dragOffset: { x: 0, y: 0 },
+    isPanning: false,
+    isDrawing: false,
+    currentPath: null
+};
+
+// 自适应 Canvas 分辨率 (处理高清屏 Retina 模糊问题)
+function resizeCanvas() {
+    const parent = canvas.parentElement;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = parent.clientWidth * dpr;
+    canvas.height = parent.clientHeight * dpr;
+    ctx.scale(dpr, dpr);
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// --- 核心工具函数 ---
+const generateId = () => '_' + Math.random().toString(36).substr(2, 9);
+const getNextZIndex = () => State.elements.length > 0 ? Math.max(...State.elements.map(e => e.zIndex)) + 1 : 1;
+
+// 加载资源供 Canvas 使用
+function loadAsset(id, type, url) {
+    if(State.assets[id]) return;
+    if (type === 'image' || type === 'svg') {
+        const img = new Image();
+        img.crossOrigin = "Anonymous"; // 解决跨域 Canvas 污染问题
+        img.src = url;
+        State.assets[id] = img;
+    } else if (type === 'video') {
+        const video = document.createElement('video');
+        video.crossOrigin = "Anonymous";
+        video.src = url;
+        video.loop = true;
+        video.muted = true;
+        video.play().catch(e => console.log("浏览器自动播放限制", e));
+        assetsContainer.appendChild(video);
+        State.assets[id] = video;
+    }
+}
+
+// 获取元素的绝对坐标 (换算父级偏移)
+function getAbsoluteBounds(el) {
+    let absX = el.x, absY = el.y;
+    if (el.parentId) {
+        const parent = State.elements.find(p => p.id === el.parentId);
+        if (parent) {
+            const pBounds = getAbsoluteBounds(parent);
+            absX += pBounds.x;
+            absY += pBounds.y;
+        }
+    }
+    return { x: absX, y: absY, w: el.w, h: el.h };
+}
+
+// 屏幕坐标 -> 画布世界坐标转换
+function screenToWorld(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+        x: (clientX - rect.left - State.camera.x) / State.camera.scale,
+        y: (clientY - rect.top - State.camera.y) / State.camera.scale
+    };
+}
+
+// --- 元素管理 ---
+function addElement(config) {
+    const el = {
+        id: generateId(),
+        type: config.type,
+        name: config.name || `未命名 ${config.type}`,
+        content: config.content || '',
+        x: config.x || 0, y: config.y || 0, w: config.w || 100, h: config.h || 100,
+        visible: true, parentId: config.parentId || null,
+        zIndex: getNextZIndex(),
+        isGroup: config.type === 'group' || config.type === 'artboard',
+        style: config.style || {}
+    };
+    
+    if(['image', 'video'].includes(el.type)) loadAsset(el.id, el.type, el.content);
+    
+    // 如果是 SVG 代码，转换为 Blob URL 以便 Image 对象加载
+    if(el.type === 'svg') {
+        const blob = new Blob([el.content], {type: 'image/svg+xml;charset=utf-8'});
+        const url = URL.createObjectURL(blob);
+        loadAsset(el.id, 'svg', url);
+    }
+
+    State.elements.push(el);
+    State.selectedId = el.id;
+    renderLayers();
+}
+
+function deleteElement(id) {
+    const children = State.elements.filter(e => e.parentId === id);
+    children.forEach(c => deleteElement(c.id));
+    State.elements = State.elements.filter(e => e.id !== id);
+    if(State.assets[id]) delete State.assets[id];
+    if(State.selectedId === id) State.selectedId = null;
+    renderLayers();
+}
+
+// --- 核心渲染引擎 (Render Loop) ---
+function drawFrame() {
+    // 1. 清空画布并绘制背景网格
+    const rect = canvas.getBoundingClientRect();
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    
+    ctx.save();
+    // 应用相机矩阵 (平移 + 缩放)
+    ctx.translate(State.camera.x, State.camera.y);
+    ctx.scale(State.camera.scale, State.camera.scale);
+
+    // 绘制网格线背景 (无限延展视觉)
+    ctx.fillStyle = '#d9d9d9';
+    const dotSize = 2;
+    const gap = 20;
+    // 简易网格: 只在可视区域绘制以优化性能
+    const startX = -State.camera.x / State.camera.scale;
+    const startY = -State.camera.y / State.camera.scale;
+    const endX = startX + rect.width / State.camera.scale;
+    const endY = startY + rect.height / State.camera.scale;
+    
+    for(let i = Math.floor(startX/gap)*gap; i < endX; i+=gap) {
+        for(let j = Math.floor(startY/gap)*gap; j < endY; j+=gap) {
+            ctx.fillRect(i, j, dotSize/State.camera.scale, dotSize/State.camera.scale);
+        }
+    }
+
+    // 2. 按 Z-index 排序绘制元素
+    const sorted = [...State.elements].filter(e => e.visible).sort((a, b) => a.zIndex - b.zIndex);
+    
+    sorted.forEach(el => {
+        const bounds = getAbsoluteBounds(el);
+        ctx.save();
+        ctx.translate(bounds.x, bounds.y); // 将原点移动到元素左上角
+        
+        ctx.beginPath();
+        // 渲染不同类型
+        switch(el.type) {
+            case 'artboard':
+                ctx.fillStyle = '#ffffff';
+                ctx.shadowColor = 'rgba(0,0,0,0.1)';
+                ctx.shadowBlur = 10;
+                ctx.shadowOffsetY = 4;
+                ctx.fillRect(0, 0, bounds.w, bounds.h);
+                ctx.strokeStyle = '#dddddd';
+                ctx.strokeRect(0, 0, bounds.w, bounds.h);
+                break;
+            case 'group':
+                ctx.strokeStyle = '#aaaaaa';
+                ctx.setLineDash([5, 5]);
+                ctx.strokeRect(0, 0, bounds.w, bounds.h);
+                break;
+            case 'text':
+                ctx.font = '24px sans-serif';
+                ctx.fillStyle = '#333';
+                ctx.textBaseline = 'top';
+                ctx.fillText(el.content, 0, 0);
+                break;
+            case 'image':
+            case 'video':
+            case 'svg':
+                const media = State.assets[el.id];
+                if (media) ctx.drawImage(media, 0, 0, bounds.w, bounds.h);
+                else {
+                    ctx.fillStyle = '#eee'; ctx.fillRect(0, 0, bounds.w, bounds.h);
+                    ctx.fillStyle = '#999'; ctx.fillText('Loading...', 10, 20);
+                }
+                break;
+            case 'path':
+                ctx.strokeStyle = '#1890ff';
+                ctx.lineWidth = 3;
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                const points = el.content;
+                if(points.length > 0) {
+                    ctx.moveTo(points[0].x, points[0].y);
+                    for(let i=1; i<points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+                    ctx.stroke();
+                }
+                break;
+        }
+        ctx.restore();
+    });
+
+    // 3. 绘制正在自由画笔的轨迹
+    if (State.isDrawing && State.currentPath) {
+        ctx.save();
+        ctx.strokeStyle = '#1890ff';
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        const p = State.currentPath;
+        if(p.length > 0) {
+            ctx.moveTo(p[0].x, p[0].y);
+            for(let i=1; i<p.length; i++) ctx.lineTo(p[i].x, p[i].y);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+
+    // 4. 绘制选中框 (Highlight)
+    if (State.selectedId) {
+        const selEl = State.elements.find(e => e.id === State.selectedId);
+        if (selEl && selEl.visible) {
+            const bounds = getAbsoluteBounds(selEl);
+            ctx.save();
+            ctx.strokeStyle = '#1890ff';
+            ctx.lineWidth = 2 / State.camera.scale; // 选中框不随缩放变粗
+            ctx.strokeRect(bounds.x, bounds.y, bounds.w, bounds.h);
+            
+            // 绘制控制点 (简单演示)
+            ctx.fillStyle = '#fff';
+            const handleSize = 6 / State.camera.scale;
+            ctx.fillRect(bounds.x - handleSize/2, bounds.y - handleSize/2, handleSize, handleSize);
+            ctx.strokeRect(bounds.x - handleSize/2, bounds.y - handleSize/2, handleSize, handleSize);
+            ctx.restore();
+        }
+    }
+
+    ctx.restore();
+    
+    // 循环驱动 (能够让视频实时播放)
+    requestAnimationFrame(drawFrame);
+}
+
+// --- 交互系统 (Hit Testing & Event Listeners) ---
+const viewport = document.getElementById('viewport');
+
+// 检测点是否在矩形内
+function hitTest(x, y) {
+    // 倒序遍历 (从最上层往下找)
+    const sorted = [...State.elements].filter(e => e.visible).sort((a, b) => b.zIndex - a.zIndex);
+    for (let el of sorted) {
+        const b = getAbsoluteBounds(el);
+        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+            return el;
+        }
+    }
+    return null;
+}
+
+viewport.addEventListener('mousedown', (e) => {
+    const worldPos = screenToWorld(e.clientX, e.clientY);
+    
+    if (State.mode === 'select') {
+        const clickedEl = hitTest(worldPos.x, worldPos.y);
+        if (clickedEl) {
+            State.selectedId = clickedEl.id;
+            State.isDragging = true;
+            // 记录鼠标与元素左上角的相对偏移量
+            const bounds = getAbsoluteBounds(clickedEl);
+            State.dragOffset = { x: worldPos.x - bounds.x, y: worldPos.y - bounds.y };
+            renderLayers();
+        } else {
+            State.selectedId = null;
+            renderLayers();
+        }
+    } 
+    else if (State.mode === 'pan' || e.button === 1 || e.spaceKey) {
+        State.isPanning = true;
+        State.dragOffset = { x: e.clientX - State.camera.x, y: e.clientY - State.camera.y };
+    }
+    else if (State.mode === 'draw') {
+        State.isDrawing = true;
+        State.currentPath = [{ x: worldPos.x, y: worldPos.y }];
+    }
+});
+
+window.addEventListener('mousemove', (e) => {
+    const worldPos = screenToWorld(e.clientX, e.clientY);
+    
+    if (State.isDragging && State.selectedId) {
+        const el = State.elements.find(e => e.id === State.selectedId);
+        // 如果有父级，拖拽时需要减去父级的坐标影响
+        let parentOffsetX = 0, parentOffsetY = 0;
+        if(el.parentId) {
+            const parent = State.elements.find(p => p.id === el.parentId);
+            const pBounds = getAbsoluteBounds(parent);
+            parentOffsetX = pBounds.x;
+            parentOffsetY = pBounds.y;
+        }
+        
+        el.x = worldPos.x - State.dragOffset.x - parentOffsetX;
+        el.y = worldPos.y - State.dragOffset.y - parentOffsetY;
+    }
+    else if (State.isPanning) {
+        State.camera.x = e.clientX - State.dragOffset.x;
+        State.camera.y = e.clientY - State.dragOffset.y;
+    }
+    else if (State.isDrawing && State.currentPath) {
+        State.currentPath.push({ x: worldPos.x, y: worldPos.y });
+    }
+});
+
+window.addEventListener('mouseup', () => {
+    if (State.isDrawing && State.currentPath) {
+        // 计算画笔边界框
+        const xs = State.currentPath.map(p => p.x);
+        const ys = State.currentPath.map(p => p.y);
+        const minX = Math.min(...xs), maxX = Math.max(...xs);
+        const minY = Math.min(...ys), maxY = Math.max(...ys);
+        
+        // 将绝对坐标转为相对坐标存储
+        const relPath = State.currentPath.map(p => ({ x: p.x - minX, y: p.y - minY }));
+        
+        addElement({ 
+            type: 'path', name: '涂鸦', content: relPath, 
+            x: minX, y: minY, w: maxX - minX, h: maxY - minY, parentId: State.selectedId 
+        });
+    }
+    State.isDragging = false;
+    State.isPanning = false;
+    State.isDrawing = false;
+    State.currentPath = null;
+});
+
+// 缩放操作
+viewport.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if(e.ctrlKey || e.metaKey) {
+        const zoomDelta = e.deltaY * -0.005;
+        const newScale = Math.min(Math.max(0.1, State.camera.scale + zoomDelta), 5);
+        
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+        
+        State.camera.x = mouseX - (mouseX - State.camera.x) * (newScale / State.camera.scale);
+        State.camera.y = mouseY - (mouseY - State.camera.y) * (newScale / State.camera.scale);
+        State.camera.scale = newScale;
+    } else {
+        State.camera.x -= e.deltaX;
+        State.camera.y -= e.deltaY;
+    }
+}, { passive: false });
+
+
+// --- 工具栏与左侧面板逻辑 ---
+function renderLayers() {
+    const list = document.getElementById('layer-list');
+    list.innerHTML = '';
+    
+    const buildTree = (parentId, depth) => {
+        const children = State.elements.filter(e => e.parentId === parentId).sort((a,b) => b.zIndex - a.zIndex);
+        children.forEach(el => {
+            const div = document.createElement('div');
+            div.className = `layer-item ${State.selectedId === el.id ? 'active' : ''}`;
+            div.onclick = (e) => { e.stopPropagation(); State.selectedId = el.id; renderLayers(); };
+
+            const icons = { artboard:'🔲', group:'📁', text:'T', image:'🖼', video:'🎬', path:'🖌', svg:'⭐' };
+            div.innerHTML = `
+                <span style="padding-left: ${depth * 16}px"></span>
+                <div class="layer-info">
+                    <span>${icons[el.type] || '🔹'}</span>
+                    <span>${el.name}</span>
+                </div>
+                <div class="layer-actions">
+                    <button class="btn-icon" onclick="event.stopPropagation(); window.toggleHide('${el.id}')">${el.visible?'👁':'🙈'}</button>
+                    <button class="btn-icon" onclick="event.stopPropagation(); deleteElement('${el.id}')" style="color:red">🗑</button>
+                </div>
+            `;
+            // 双击修改文本或重命名
+            div.ondblclick = () => {
+                if(el.type === 'text') {
+                    const txt = prompt('编辑文本:', el.content);
+                    if(txt) el.content = txt;
+                } else {
+                    const nm = prompt('重命名:', el.name);
+                    if(nm) el.name = nm;
+                }
+                renderLayers();
+            };
+            list.appendChild(div);
+            if(el.isGroup) buildTree(el.id, depth + 1);
+        });
+    };
+    buildTree(null, 0);
+}
+window.toggleHide = (id) => { const el = State.elements.find(e=>e.id===id); if(el) el.visible = !el.visible; renderLayers(); }
+
+// 模式切换
+const switchMode = (mode, btnId) => {
+    State.mode = mode;
+    document.querySelectorAll('#toolbar .btn').forEach(b => b.classList.remove('active'));
+    document.getElementById(btnId).classList.add('active');
+    viewport.className = `mode-${mode}`;
+};
+document.getElementById('tool-select').onclick = () => switchMode('select', 'tool-select');
+document.getElementById('tool-pan').onclick = () => switchMode('pan', 'tool-pan');
+document.getElementById('tool-draw').onclick = () => switchMode('draw', 'tool-draw');
+
+// 插入元素
+const getCenter = () => screenToWorld(viewport.clientWidth/2 + 260, viewport.clientHeight/2);
+
+document.getElementById('add-artboard').onclick = () => {
+    const c = getCenter(); addElement({ type: 'artboard', name: '新画板', x: c.x-200, y: c.y-150, w: 400, h: 300 });
+};
+document.getElementById('add-text').onclick = () => {
+    const c = getCenter(); addElement({ type: 'text', name: '文本', content: '双击图层编辑', x: c.x, y: c.y, w: 150, h: 40, parentId: State.selectedId });
+};
+document.getElementById('add-img').onclick = () => {
+    const c = getCenter(); addElement({ type: 'image', name: '图片', content: 'https://images.unsplash.com/photo-1506744626753-eda8151a7474?w=400&h=300&fit=crop&q=80', x: c.x-100, y: c.y-75, w: 200, h: 150, parentId: State.selectedId });
+};
+document.getElementById('add-video').onclick = () => {
+    // 采用允许跨域的开源测试视频
+    const c = getCenter(); addElement({ type: 'video', name: '视频', content: 'https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4', x: c.x-160, y: c.y-90, w: 320, h: 180, parentId: State.selectedId });
+};
+
+// --- 原生导出智能画板 (Canvas toDataURL) ---
+document.getElementById('export-artboard').onclick = () => {
+    const artboard = State.elements.find(e => e.id === State.selectedId);
+    if (!artboard || artboard.type !== 'artboard') return alert('请先在左侧选中一个【画板】');
+
+    // 1. 创建离屏 Canvas
+    const offCanvas = document.createElement('canvas');
+    offCanvas.width = artboard.w;
+    offCanvas.height = artboard.h;
+    const offCtx = offCanvas.getContext('2d');
+
+    // 2. 找到画板及其所有子元素
+    const children = State.elements.filter(e => e.parentId === artboard.id || e.id === artboard.id).sort((a,b) => a.zIndex - b.zIndex);
+    
+    // 3. 相对坐标渲染
+    children.forEach(el => {
+        if(!el.visible) return;
+        offCtx.save();
+        // 计算相对于画板的局部坐标
+        let localX = el.id === artboard.id ? 0 : el.x;
+        let localY = el.id === artboard.id ? 0 : el.y;
+        
+        offCtx.translate(localX, localY);
+        
+        switch(el.type) {
+            case 'artboard': 
+                // 需求：透明底，所以不填充白色背景，保持 clearRect 状态
+                break;
+            case 'text':
+                offCtx.font = '24px sans-serif'; offCtx.fillStyle = '#333'; offCtx.textBaseline = 'top'; offCtx.fillText(el.content, 0, 0); break;
+            case 'image': case 'video': case 'svg':
+                if(State.assets[el.id]) offCtx.drawImage(State.assets[el.id], 0, 0, el.w, el.h); break;
+            case 'path':
+                offCtx.strokeStyle = '#1890ff'; offCtx.lineWidth = 3; offCtx.beginPath();
+                if(el.content.length > 0){ offCtx.moveTo(el.content[0].x, el.content[0].y); for(let i=1;i<el.content.length;i++) offCtx.lineTo(el.content[i].x, el.content[i].y); offCtx.stroke(); }
+                break;
+        }
+        offCtx.restore();
+    });
+
+    // 4. 触发下载
+    try {
+        const link = document.createElement('a');
+        link.download = `${artboard.name}_${Date.now()}.png`;
+        link.href = offCanvas.toDataURL('image/png'); // 原生 API，瞬间导出
+        link.click();
+    } catch (e) {
+        alert("导出失败：请检查图片或视频源是否允许跨域 (CORS)。报错信息：" + e.message);
+    }
+};
+
+// 启动引擎
+function init() {
+    addElement({ type: 'artboard', name: '主画板', x: 200, y: 100, w: 600, h: 400 });
+    addElement({ type: 'text', name: '标题文本', content: '这是一段 Canvas 渲染的文字', x: 250, y: 150, w: 200, h: 40, parentId: State.elements[0].id });
+    // 启动帧循环
+    requestAnimationFrame(drawFrame);
+}
+
+init();
+</script>
+</body>
+</html>
