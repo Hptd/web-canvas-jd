@@ -1,26 +1,90 @@
 <template>
-  <img alt="Vue logo" src="./assets/logo.png">
-  <HelloWorld msg="Welcome to Your Vue.js App"/>
+  <div id="app">
+    <!-- 左侧边栏 -->
+    <CanvasSidebar
+      :elements="canvasStore.state.elements"
+      :selected-id="canvasStore.state.selectedId"
+      @select="canvasStore.setSelectedId"
+      @delete="canvasStore.deleteElement"
+      @toggle-hide="canvasStore.toggleHide"
+      @group="canvasStore.groupElements"
+      @ungroup="canvasStore.ungroupElements"
+      @update-element="canvasStore.updateElement"
+    />
+    
+    <!-- 主内容区 -->
+    <div id="main">
+      <!-- 悬浮工具栏 -->
+      <CanvasToolbar
+        :mode="canvasStore.state.mode"
+        :selected-id="canvasStore.state.selectedId"
+        @mode-change="canvasStore.setMode"
+        @add-element="canvasStore.addElement"
+        @export="handleExport"
+      />
+      
+      <!-- 画布视口 -->
+      <CanvasViewport :canvas-store="canvasStore" />
+    </div>
+  </div>
 </template>
 
 <script>
-import HelloWorld from './components/HelloWorld.vue'
+import { onMounted } from 'vue';
+import canvasStore from '@/store/canvas.js';
+import CanvasSidebar from '@/components/Sidebar.vue';
+import CanvasToolbar from '@/components/Toolbar.vue';
+import CanvasViewport from '@/components/CanvasViewport.vue';
 
 export default {
   name: 'App',
   components: {
-    HelloWorld
+    CanvasSidebar,
+    CanvasToolbar,
+    CanvasViewport
+  },
+  setup() {
+    const handleExport = () => {
+      canvasStore.exportArtboard(canvasStore.state.selectedId);
+    };
+
+    onMounted(() => {
+      canvasStore.initDefaultData();
+    });
+
+    return {
+      canvasStore,
+      handleExport
+    };
   }
-}
+};
 </script>
 
 <style>
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  user-select: none;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  overflow: hidden;
+  background: #f5f5f5;
+}
+
 #app {
-  font-family: Avenir, Helvetica, Arial, sans-serif;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  text-align: center;
-  color: #2c3e50;
-  margin-top: 60px;
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+#main {
+  flex: 1;
+  position: relative;
+  display: flex;
+  overflow: hidden;
 }
 </style>
