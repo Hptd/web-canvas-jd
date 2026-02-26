@@ -13,6 +13,8 @@ const getNextZIndex = (elements) => {
 const state = reactive({
   elements: [],
   selectedId: null,
+  selectedIds: [], // 多选状态：存储所有选中的元素ID
+  lastSelectedId: null, // 最后一次选中的元素ID（用于Shift范围选择）
   mode: 'select', // select | pan | draw
   camera: { x: 0, y: 0, scale: 1 },
   assets: {}, // 缓存加载的 Image/Video 对象
@@ -130,6 +132,85 @@ const setMode = (mode) => {
 // 设置选中元素
 const setSelectedId = (id) => {
   state.selectedId = id;
+  state.selectedIds = id ? [id] : [];
+  state.lastSelectedId = id;
+};
+
+// 切换元素选中状态（Ctrl+点击）
+const toggleSelection = (id) => {
+  const index = state.selectedIds.indexOf(id);
+  if (index > -1) {
+    // 已选中则取消选中
+    state.selectedIds.splice(index, 1);
+  } else {
+    // 未选中则添加选中
+    state.selectedIds.push(id);
+  }
+  // 更新主选中ID为最后一个选中的元素
+  state.selectedId = state.selectedIds.length > 0 
+    ? state.selectedIds[state.selectedIds.length - 1] 
+    : null;
+  state.lastSelectedId = id;
+};
+
+// 范围选择（Shift+点击）
+const selectRange = (endId) => {
+  if (!state.lastSelectedId || state.lastSelectedId === endId) {
+    // 如果没有上次选中的元素，或点击的是同一个元素，则单选
+    setSelectedId(endId);
+    return;
+  }
+  
+  // 获取所有可见的图层项（按照layerTree的顺序）
+  const getAllVisibleIds = () => {
+    const result = [];
+    const buildTree = (parentId) => {
+      const children = state.elements
+        .filter(e => e.parentId === parentId)
+        .sort((a, b) => b.zIndex - a.zIndex);
+      
+      children.forEach(el => {
+        result.push(el.id);
+        // 如果是展开的组，递归添加子元素
+        if (el.isGroup) {
+          buildTree(el.id);
+        }
+      });
+    };
+    buildTree(null);
+    return result;
+  };
+  
+  const allIds = getAllVisibleIds();
+  const startIndex = allIds.indexOf(state.lastSelectedId);
+  const endIndex = allIds.indexOf(endId);
+  
+  if (startIndex === -1 || endIndex === -1) {
+    setSelectedId(endId);
+    return;
+  }
+  
+  // 获取范围内的所有ID
+  const start = Math.min(startIndex, endIndex);
+  const end = Math.max(startIndex, endIndex);
+  const rangeIds = allIds.slice(start, end + 1);
+  
+  // 合并当前选中和范围内的ID
+  const newSelection = [...new Set([...state.selectedIds, ...rangeIds])];
+  state.selectedIds = newSelection;
+  state.selectedId = endId;
+};
+
+// 清空选择
+const clearSelection = () => {
+  state.selectedIds = [];
+  state.selectedId = null;
+  state.lastSelectedId = null;
+};
+
+// 检查元素是否被选中
+const isSelected = (id) => {
+  return state.selectedIds.includes(id);
 };
 
 // 更新相机位置
@@ -239,16 +320,121 @@ const updateElement = (id, updates) => {
   }
 };
 
-// 打组
+// 打组 - 将选中的元素放入一个新组中
 const groupElements = () => {
-  // TODO: 实现打组逻辑
-  console.log('打组功能待实现');
+  // 获取当前选中的元素ID
+  const selectedIds = state.selectedIds.length > 0 ? state.selectedIds : (state.selectedId ? [state.selectedId] : []);
+  
+  if (selectedIds.length === 0) {
+    console.log('没有选中的元素，无法打组');
+    return;
+  }
+
+  // 获取选中的元素
+  const selectedElements = state.elements.filter(e => selectedIds.includes(e.id));
+  
+  if (selectedElements.length === 0) {
+    return;
+  }
+
+  // 找到这些元素的共同父级（如果父级不同，则以第一个元素的父级为准）
+  const parentId = selectedElements[0].parentId;
+  
+  // 检查是否所有选中元素都有相同的父级
+  const allSameParent = selectedElements.every(e => e.parentId === parentId);
+  if (!allSameParent) {
+    alert('只能将同一层级的元素打组');
+    return;
+  }
+
+  // 计算选中元素的边界框
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  selectedElements.forEach(el => {
+    minX = Math.min(minX, el.x);
+    minY = Math.min(minY, el.y);
+    maxX = Math.max(maxX, el.x + el.w);
+    maxY = Math.max(maxY, el.y + el.h);
+  });
+
+  // 创建新组
+  const groupId = generateId();
+  const groupElement = {
+    id: groupId,
+    type: 'group',
+    name: '组',
+    content: '',
+    x: minX,
+    y: minY,
+    w: maxX - minX,
+    h: maxY - minY,
+    visible: true,
+    parentId: parentId,
+    zIndex: getNextZIndex(state.elements),
+    isGroup: true,
+    style: {}
+  };
+
+  // 将选中元素的坐标转换为相对于新组的坐标
+  selectedElements.forEach(el => {
+    el.x = el.x - minX;
+    el.y = el.y - minY;
+    el.parentId = groupId;
+  });
+
+  // 添加新组到元素列表
+  state.elements.push(groupElement);
+  
+  // 更新选中状态为新组
+  state.selectedId = groupId;
+  state.selectedIds = [groupId];
+  state.lastSelectedId = groupId;
+  
+  console.log('打组成功:', groupId);
 };
 
-// 解散组
+// 解散组 - 将组的子元素移出组
 const ungroupElements = () => {
-  // TODO: 实现解散组逻辑
-  console.log('解散组功能待实现');
+  // 获取当前选中的组
+  const selectedIds = state.selectedIds.length > 0 ? state.selectedIds : (state.selectedId ? [state.selectedId] : []);
+  
+  if (selectedIds.length === 0) {
+    console.log('没有选中的元素');
+    return;
+  }
+
+  // 获取选中的组元素
+  const selectedGroups = state.elements.filter(e => selectedIds.includes(e.id) && e.isGroup);
+  
+  if (selectedGroups.length === 0) {
+    console.log('没有选中的组');
+    return;
+  }
+
+  // 解散每个选中的组
+  selectedGroups.forEach(group => {
+    // 找到该组的所有子元素
+    const children = state.elements.filter(e => e.parentId === group.id);
+    
+    // 将子元素移出组，坐标转换为世界坐标
+    children.forEach(child => {
+      child.x = child.x + group.x;
+      child.y = child.y + group.y;
+      child.parentId = group.parentId;
+    });
+    
+    // 删除组元素
+    const groupIndex = state.elements.findIndex(e => e.id === group.id);
+    if (groupIndex > -1) {
+      state.elements.splice(groupIndex, 1);
+    }
+  });
+
+  // 清空选中状态
+  state.selectedId = null;
+  state.selectedIds = [];
+  state.lastSelectedId = null;
+  
+  console.log('解散组成功');
 };
 
 // 导出画板
@@ -363,6 +549,11 @@ export default {
   screenToWorld,
   initDefaultData,
   loadAsset,
+  // 多选方法
+  toggleSelection,
+  selectRange,
+  clearSelection,
+  isSelected,
   // 钢笔工具方法
   startPenDrawing,
   addPenPoint,

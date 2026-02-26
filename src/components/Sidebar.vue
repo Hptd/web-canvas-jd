@@ -1,5 +1,5 @@
 <template>
-  <div id="sidebar">
+  <div id="sidebar" @contextmenu.prevent>
     <!-- 顶部下拉 -->
     <div class="sidebar-header">
       <div class="dropdown">
@@ -17,10 +17,11 @@
     <div id="layer-list">
       <template v-for="item in layerTree" :key="item.id">
         <div
-          :class="['layer-item', { active: selectedId === item.id, group: item.isGroup }]"
+          :class="['layer-item', { active: isItemSelected(item.id), group: item.isGroup }]"
           :style="{ paddingLeft: 12 + item.depth * 16 + 'px' }"
-          @click.stop="setSelectedId(item.id)"
+          @click.stop="handleItemClick(item.id, $event)"
           @dblclick="handleDoubleClick(item)"
+          @contextmenu.stop.prevent="handleContextMenu(item.id, $event)"
         >
           <!-- 展开/折叠图标 -->
           <span v-if="item.isGroup" class="expand-icon" @click.stop="toggleExpand(item)">
@@ -113,11 +114,32 @@
         </div>
       </template>
     </div>
+
+    <!-- 右键菜单 -->
+    <div
+      v-if="contextMenu.show"
+      class="context-menu"
+      :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
+    >
+      <div class="context-menu-item" @click="handleGroupFromMenu">
+        <span>创建编组</span>
+        <span class="shortcut">Ctrl + G</span>
+      </div>
+      <div class="context-menu-item" @click="handleUngroupFromMenu">
+        <span>解散编组</span>
+        <span class="shortcut">Ctrl + Shift + G</span>
+      </div>
+      <div class="context-menu-divider"></div>
+      <div class="context-menu-item" @click="handleDeleteFromMenu">
+        <span>删除</span>
+        <span class="shortcut">Delete</span>
+      </div>
+    </div>
   </div>
 </template>
 
 <script>
-import { computed, ref } from 'vue';
+import { computed, ref, onMounted, onUnmounted } from 'vue';
 
 export default {
   name: 'CanvasSidebar',
@@ -129,11 +151,23 @@ export default {
     selectedId: {
       type: String,
       default: null
+    },
+    selectedIds: {
+      type: Array,
+      default: () => []
     }
   },
-  emits: ['select', 'delete', 'toggle-hide', 'group', 'ungroup', 'update-element'],
+  emits: ['select', 'toggle-selection', 'select-range', 'delete', 'toggle-hide', 'group', 'ungroup', 'update-element', 'keydown-g', 'keydown-shift-g'],
   setup(props, { emit }) {
     const expandedGroups = ref(new Set());
+    
+    // 右键菜单状态
+    const contextMenu = ref({
+      show: false,
+      x: 0,
+      y: 0,
+      targetId: null
+    });
 
     // 构建图层树
     const layerTree = computed(() => {
@@ -155,6 +189,90 @@ export default {
       
       return buildTree(null, 0);
     });
+
+    // 检查元素是否被选中
+    const isItemSelected = (id) => {
+      return props.selectedIds.includes(id);
+    };
+
+    // 处理图层项点击事件
+    const handleItemClick = (id, event) => {
+      // 隐藏右键菜单
+      contextMenu.value.show = false;
+      
+      if (event.ctrlKey || event.metaKey) {
+        // Ctrl+点击：切换选中状态
+        emit('toggle-selection', id);
+      } else if (event.shiftKey) {
+        // Shift+点击：范围选择
+        emit('select-range', id);
+      } else {
+        // 普通点击：单选
+        emit('select', id);
+      }
+    };
+
+    // 处理右键菜单
+    const handleContextMenu = (id, event) => {
+      // 如果右键点击的元素未被选中，则先选中它
+      if (!props.selectedIds.includes(id)) {
+        emit('select', id);
+      }
+      
+      // 显示右键菜单
+      contextMenu.value = {
+        show: true,
+        x: event.clientX,
+        y: event.clientY,
+        targetId: id
+      };
+    };
+
+    // 从菜单执行打组
+    const handleGroupFromMenu = () => {
+      contextMenu.value.show = false;
+      emit('group');
+    };
+
+    // 从菜单执行解散组
+    const handleUngroupFromMenu = () => {
+      contextMenu.value.show = false;
+      emit('ungroup');
+    };
+
+    // 从菜单执行删除
+    const handleDeleteFromMenu = () => {
+      contextMenu.value.show = false;
+      // 删除所有选中的元素
+      props.selectedIds.forEach(id => {
+        emit('delete', id);
+      });
+    };
+
+    // 点击外部关闭右键菜单
+    const closeContextMenu = () => {
+      contextMenu.value.show = false;
+    };
+
+    // 键盘事件处理
+    const handleKeyDown = (event) => {
+      // 只在侧边栏有焦点时处理
+      if (!document.getElementById('sidebar')?.contains(document.activeElement)) {
+        return;
+      }
+      
+      // Ctrl + G: 打组
+      if (event.ctrlKey && !event.shiftKey && event.key === 'g') {
+        event.preventDefault();
+        emit('group');
+      }
+      
+      // Ctrl + Shift + G: 解散组
+      if (event.ctrlKey && event.shiftKey && event.key === 'g') {
+        event.preventDefault();
+        emit('ungroup');
+      }
+    };
 
     const setSelectedId = (id) => {
       emit('select', id);
@@ -182,8 +300,32 @@ export default {
       }
     };
 
+    // 全局点击事件监听（关闭右键菜单）
+    const handleGlobalClick = () => {
+      closeContextMenu();
+    };
+
+    // 组件挂载时添加全局事件监听
+    onMounted(() => {
+      document.addEventListener('click', handleGlobalClick);
+      document.addEventListener('keydown', handleKeyDown);
+    });
+
+    // 组件卸载时移除全局事件监听
+    onUnmounted(() => {
+      document.removeEventListener('click', handleGlobalClick);
+      document.removeEventListener('keydown', handleKeyDown);
+    });
+
     return {
       layerTree,
+      contextMenu,
+      isItemSelected,
+      handleItemClick,
+      handleContextMenu,
+      handleGroupFromMenu,
+      handleUngroupFromMenu,
+      handleDeleteFromMenu,
       setSelectedId,
       toggleExpand,
       handleDoubleClick
@@ -317,5 +459,43 @@ export default {
 .layer-visibility svg {
   width: 14px;
   height: 14px;
+}
+
+/* 右键菜单样式 */
+.context-menu {
+  position: fixed;
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  padding: 4px 0;
+  min-width: 180px;
+  z-index: 1000;
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: background 0.15s;
+  font-size: 13px;
+  color: #333;
+}
+
+.context-menu-item:hover {
+  background: #f5f5f5;
+}
+
+.context-menu-item .shortcut {
+  font-size: 11px;
+  color: #999;
+  margin-left: 16px;
+}
+
+.context-menu-divider {
+  height: 1px;
+  background: #e8e8e8;
+  margin: 4px 0;
 }
 </style>

@@ -4,7 +4,10 @@
     <CanvasSidebar
       :elements="canvasStore.state.elements"
       :selected-id="canvasStore.state.selectedId"
+      :selected-ids="canvasStore.state.selectedIds"
       @select="canvasStore.setSelectedId"
+      @toggle-selection="canvasStore.toggleSelection"
+      @select-range="canvasStore.selectRange"
       @delete="canvasStore.deleteElement"
       @toggle-hide="canvasStore.toggleHide"
       @group="canvasStore.groupElements"
@@ -30,7 +33,7 @@
 </template>
 
 <script>
-import { onMounted } from 'vue';
+import { onMounted, onUnmounted } from 'vue';
 import canvasStore from '@/store/canvas.js';
 import CanvasSidebar from '@/components/Sidebar.vue';
 import CanvasToolbar from '@/components/Toolbar.vue';
@@ -48,8 +51,31 @@ export default {
       canvasStore.exportArtboard(canvasStore.state.selectedId);
     };
 
+    // 全局键盘事件处理
+    const handleGlobalKeyDown = (event) => {
+      // 禁用默认的 Ctrl+G 行为
+      if (event.ctrlKey && event.key === 'g') {
+        event.preventDefault();
+        
+        if (event.shiftKey) {
+          // Ctrl + Shift + G: 解散组
+          canvasStore.ungroupElements();
+        } else {
+          // Ctrl + G: 打组
+          canvasStore.groupElements();
+        }
+      }
+    };
+
     onMounted(() => {
       canvasStore.initDefaultData();
+      // 添加全局键盘事件监听
+      document.addEventListener('keydown', handleGlobalKeyDown);
+    });
+
+    onUnmounted(() => {
+      // 移除全局键盘事件监听
+      document.removeEventListener('keydown', handleGlobalKeyDown);
     });
 
     return {
